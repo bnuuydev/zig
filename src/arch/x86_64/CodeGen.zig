@@ -82265,6 +82265,9 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
             .c_va_end => try cg.airVaEnd(inst),
             .c_va_start => try cg.airVaStart(inst),
             .work_item_id, .work_group_size, .work_group_id => unreachable,
+
+            .deposit_bits,
+            .extract_bits => |tag| try cg.airDepositExtractBits(inst, tag),
         }
         try cg.resetTemps(@enumFromInt(0));
         cg.checkInvariantsAfterAirInst();
@@ -85792,6 +85795,169 @@ fn airPtrSlicePtrPtr(self: *CodeGen, inst: Air.Inst.Index) !void {
     else
         try self.copyToRegisterWithInstTracking(inst, dst_ty, opt_mcv);
     return self.finishAir(inst, dst_mcv, .{ ty_op.operand, .none, .none });
+}
+
+fn airDepositExtractBits(self: *CodeGen, inst: Air.Inst.Index, tag: Air.Inst.Tag) !void {
+    const zcu = self.pt.zcu;
+
+    const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
+
+    const dest_ty = self.typeOfIndex(inst);
+    const abi_size: u32 = @intCast(@max(dest_ty.abiSize(zcu), 4));
+
+    const result = if (!self.hasFeature(.bmi2) or abi_size > 8)
+        try genDepositExtractBitsEmulated(self, inst, tag, bin_op.lhs, bin_op.rhs, dest_ty, abi_size)
+    else
+        try genDepositExtractBitsNative(self, inst, tag, bin_op.lhs, bin_op.rhs, dest_ty, abi_size);
+
+    return self.finishAir(inst, result, .{ bin_op.lhs, bin_op.rhs, .none });
+}
+
+fn genDepositExtractBitsEmulated(
+    self: *CodeGen,
+    inst: Air.Inst.Index,
+    tag: Air.Inst.Tag,
+    lhs: Air.Inst.Ref,
+    rhs: Air.Inst.Ref,
+    dest_ty: Type,
+    abi_size: u32,
+) !MCValue {
+    const pt = self.pt;
+    const zcu = pt.zcu;
+
+    var callee_buf: ["__pdep_bigint".len]u8 = undefined;
+    const callee = std.fmt.bufPrint(&callee_buf, "__{s}_{s}", .{
+        switch (tag) {
+            .deposit_bits => "pdep",
+            .extract_bits => "pext",
+            else => unreachable,
+        },
+        switch (abi_size) {
+            0...4 => "u32",
+            5...8 => "u64",
+            9...16 => "u128",
+            else => "bigint",
+        },
+    }) catch unreachable;
+
+    if (abi_size <= 16) return try self.genCall(.{ .lib = .{
+        .return_type = dest_ty.toIntern(),
+        .param_types = &.{ dest_ty.toIntern(), dest_ty.toIntern() },
+        .callee = callee,
+    } }, &.{ dest_ty, dest_ty }, &.{ .{ .air_ref = lhs }, .{ .air_ref = rhs } }, .{});
+
+    const bit_count = dest_ty.intInfo(zcu).bits;
+
+    const dest_mcv = try self.allocRegOrMemAdvanced(dest_ty, inst, false);
+    const lhs_mcv = try self.resolveInst(lhs);
+    const rhs_mcv = try self.resolveInst(rhs);
+
+    const manyptr_u32_ty = try pt.ptrType(.{
+        .child = .u32_type,
+        .flags = .{
+            .size = .many,
+        },
+    });
+    const manyptr_const_u32_ty = try pt.ptrType(.{
+        .child = .u32_type,
+        .flags = .{
+            .size = .many,
+            .is_const = true,
+        },
+    });
+
+    _ = try self.genCall(.{ .lib = .{
+        .return_type = .void_type,
+        .param_types = &.{
+            manyptr_u32_ty.toIntern(),
+            manyptr_const_u32_ty.toIntern(),
+            manyptr_const_u32_ty.toIntern(),
+            .usize_type,
+        },
+        .callee = callee,
+    } }, &.{
+        manyptr_u32_ty,
+        manyptr_const_u32_ty,
+        manyptr_const_u32_ty,
+        Type.usize,
+    }, &.{
+        dest_mcv.address(),
+        lhs_mcv.address(),
+        rhs_mcv.address(),
+        .{ .immediate = bit_count },
+    }, .{});
+
+    return dest_mcv;
+}
+
+fn genDepositExtractBitsNative(
+    self: *CodeGen,
+    inst: Air.Inst.Index,
+    tag: Air.Inst.Tag,
+    lhs: Air.Inst.Ref,
+    rhs: Air.Inst.Ref,
+    dest_ty: Type,
+    abi_size: u32,
+) !MCValue {
+    assert(self.hasFeature(.bmi2)); // BMI2 must be present for PEXT/PDEP instructions
+    assert(abi_size <= 8); // PEXT/PDEP only exist for 64-bit and below
+
+    const lhs_mcv = try self.resolveInst(lhs);
+    const rhs_mcv = try self.resolveInst(rhs);
+
+    const lhs_lock: ?RegisterLock = switch (lhs_mcv) {
+        .register => |reg| self.register_manager.lockRegAssumeUnused(reg),
+        else => null,
+    };
+    defer if (lhs_lock) |lock| self.register_manager.unlockReg(lock);
+
+    const rhs_lock: ?RegisterLock = switch (rhs_mcv) {
+        .register => |reg| self.register_manager.lockReg(reg),
+        else => null,
+    };
+    defer if (rhs_lock) |lock| self.register_manager.unlockReg(lock);
+
+    const dest_mcv: MCValue, const dest_is_lhs = dest: {
+        if (rhs_mcv.isRegister() and self.reuseOperand(inst, rhs, 1, rhs_mcv))
+            break :dest .{ rhs_mcv, false };
+
+        if (lhs_mcv.isRegister() and self.reuseOperand(inst, lhs, 0, lhs_mcv))
+            break :dest .{ lhs_mcv, false };
+
+        break :dest .{ try self.copyToRegisterWithInstTracking(inst, dest_ty, lhs_mcv), true };
+    };
+
+    const dest_reg = dest_mcv.getReg().?;
+    const dest_lock = self.register_manager.lockReg(dest_reg);
+    defer if (dest_lock) |lock| self.register_manager.unlockReg(lock);
+
+    const lhs_reg = if (dest_is_lhs) dest_reg else if (lhs_mcv.getReg()) |reg| reg else try self.copyToTmpRegister(dest_ty, lhs_mcv);
+
+    const mir_tag = Mir.Inst.FixedTag{ ._, switch (tag) {
+        .deposit_bits => .pdep,
+        .extract_bits => .pext,
+        else => unreachable,
+    } };
+
+    if (rhs_mcv.isMemory()) {
+        try self.asmRegisterRegisterMemory(
+            mir_tag,
+            registerAlias(dest_reg, abi_size),
+            registerAlias(lhs_reg, abi_size),
+            try rhs_mcv.mem(self, .{ .size = Memory.Size.fromSize(abi_size) }),
+        );
+    } else {
+        const rhs_reg = if (rhs_mcv.getReg()) |reg| reg else try self.copyToTmpRegister(dest_ty, rhs_mcv);
+
+        try self.asmRegisterRegisterRegister(
+            mir_tag,
+            registerAlias(dest_reg, abi_size),
+            registerAlias(lhs_reg, abi_size),
+            registerAlias(rhs_reg, abi_size),
+        );
+    }
+
+    return dest_mcv;
 }
 
 fn elemOffset(self: *CodeGen, index_ty: Type, index: MCValue, elem_size: u64) !Register {
