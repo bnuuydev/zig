@@ -10929,6 +10929,27 @@ pub const FuncGen = struct {
                 compiler_rt_bits,
             });
 
+            if (bits == 128) {
+                // For u128, we need to split the values into two u64s
+                const u64_ty = try o.builder.intType(64);
+                const source_lo = try self.wip.cast(.trunc, source, u64_ty, "");
+                const source_hi = try self.wip.cast(.trunc, try self.wip.bin(.lshr, source, try o.builder.intValue(ty, 64), ""), u64_ty, "");
+                const mask_lo = try self.wip.cast(.trunc, mask, u64_ty, "");
+                const mask_hi = try self.wip.cast(.trunc, try self.wip.bin(.lshr, mask, try o.builder.intValue(ty, 64), ""), u64_ty, "");
+
+                const params = .{ source_lo, source_hi, mask_lo, mask_hi };
+                const libc_fn = try self.getLibcFunction(fn_name, &.{ u64_ty, u64_ty, u64_ty, u64_ty }, ty);
+                return try self.wip.call(
+                    .normal,
+                    .ccc,
+                    .none,
+                    libc_fn.typeOf(&o.builder),
+                    libc_fn.toValue(&o.builder),
+                    &params,
+                    "",
+                );
+            }
+
             const params = .{
                 if (needs_extend) try self.wip.cast(.zext, source, extended_ty, "") else source,
                 if (needs_extend) try self.wip.cast(.zext, mask, extended_ty, "") else mask,
