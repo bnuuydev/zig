@@ -1382,10 +1382,11 @@ zig_builtin_clz(32)
 zig_builtin_clz(64)
 
 #define zig_builtin_extract_bits(w) \
-    static inline uint##w##_t zig_extract_bits_u##w(uint##w##_t source, uint##w##_t mask_) { \
+    static inline uint##w##_t zig_extract_bits_u##w(uint##w##_t source, uint##w##_t mask_, uint8_t bits) { \
         uint##w##_t bb = 1;\
         uint##w##_t result = 0;\
         uint##w##_t mask = mask_;\
+        (void)bits;\
         \
         while (mask != 0) {\
             uint##w##_t bit = mask & ~(mask - 1);\
@@ -1399,36 +1400,38 @@ zig_builtin_clz(64)
     }
 
 #if zig_has_builtin(ia32_pext_di)
-    static inline uint64_t zig_extract_bits_u64(uint64_t source, uint64_t mask) {
+    static inline uint64_t zig_extract_bits_u64(uint64_t source, uint64_t mask, uint8_t bits) {
+        (void)bits;
         return __builtin_ia32_pext_di(source, mask);
     }
-#else
-zig_builtin_extract_bits(64)
-#endif
 
-#if zig_has_builtin(ia32_pext_si)
-    static inline uint32_t zig_extract_bits_u32(uint32_t source, uint32_t mask) {
+    static inline uint32_t zig_extract_bits_u32(uint32_t source, uint32_t mask, uint8_t bits) {
+        (void)bits;
         return __builtin_ia32_pext_si(source, mask);
     }
 
-    static inline uint16_t zig_extract_bits_u16(uint16_t source, uint16_t mask) {
+    static inline uint16_t zig_extract_bits_u16(uint16_t source, uint16_t mask, uint8_t bits) {
+        (void)bits;
         return (uint16_t)__builtin_ia32_pext_si(source, mask);
     }
 
-    static inline uint8_t zig_extract_bits_u8(uint8_t source, uint8_t mask) {
+    static inline uint8_t zig_extract_bits_u8(uint8_t source, uint8_t mask, uint8_t bits) {
+        (void)bits;
         return (uint8_t)__builtin_ia32_pext_si(source, mask);
     }
 #else
+zig_builtin_extract_bits(64)
 zig_builtin_extract_bits(32)
 zig_builtin_extract_bits(16)
 zig_builtin_extract_bits(8)
 #endif
 
 #define zig_builtin_deposit_bits(w) \
-    static inline uint##w##_t zig_deposit_bits_u##w(uint##w##_t source, uint##w##_t mask_) { \
+    static inline uint##w##_t zig_deposit_bits_u##w(uint##w##_t source, uint##w##_t mask_, uint8_t bits) { \
         uint##w##_t bb = 1;\
         uint##w##_t result = 0;\
         uint##w##_t mask = mask_;\
+        (void)bits;\
         \
         while (mask != 0) {\
             uint##w##_t bit = mask & ~(mask - 1);\
@@ -1441,27 +1444,28 @@ zig_builtin_extract_bits(8)
         return result;\
     }
 
-#if zig_has_builtin(ia32_pext_di)
-    static inline uint64_t zig_deposit_bits_u64(uint64_t source, uint64_t mask) {
+#if zig_has_builtin(ia32_pdep_di)
+    static inline uint64_t zig_deposit_bits_u64(uint64_t source, uint64_t mask, uint8_t bits) {
+        (void)bits;
         return __builtin_ia32_pdep_di(source, mask);
     }
-#else
-zig_builtin_deposit_bits(64)
-#endif
 
-#if zig_has_builtin(ia32_pext_si)
-    static inline uint32_t zig_deposit_bits_u32(uint32_t source, uint32_t mask) {
+    static inline uint32_t zig_deposit_bits_u32(uint32_t source, uint32_t mask, uint8_t bits) {
+        (void)bits;
         return __builtin_ia32_pdep_si(source, mask);
     }
 
-    static inline uint16_t zig_deposit_bits_u16(uint16_t source, uint16_t mask) {
+    static inline uint16_t zig_deposit_bits_u16(uint16_t source, uint16_t mask, uint8_t bits) {
+        (void)bits;
         return (uint16_t)__builtin_ia32_pdep_si(source, mask);
     }
 
-    static inline uint8_t zig_deposit_bits_u8(uint8_t source, uint8_t mask) {
+    static inline uint8_t zig_deposit_bits_u8(uint8_t source, uint8_t mask, uint8_t bits) {
+        (void)bits;
         return (uint8_t)__builtin_ia32_pdep_si(source, mask);
     }
 #else
+zig_builtin_deposit_bits(64)
 zig_builtin_deposit_bits(32)
 zig_builtin_deposit_bits(16)
 zig_builtin_deposit_bits(8)
@@ -3272,6 +3276,253 @@ static inline uint16_t zig_popcount_big(const void *val, bool is_signed, uint16_
     }
 
     return total_pc;
+}
+
+// TODO big endian
+static inline void zig_extract_bits_big(void *res, const void *lhs, const void *rhs, bool is_signed, uint16_t bits) {
+    uint8_t *res_bytes = res;
+    const uint8_t *lhs_bytes = lhs;
+    const uint8_t *rhs_bytes = rhs;
+    uint16_t byte_offset = 0;
+    uint16_t remaining_bytes = zig_int_bytes(bits);
+    uint64_t shift = 0;
+    (void)is_signed;
+
+    while (remaining_bytes >= 64 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 64;
+        uint64_t shift_limbs = shift / 64;
+
+        uint64_t source_limb;
+        uint64_t mask_limb;
+
+        memcpy(&source_limb, &lhs_bytes[byte_offset], sizeof(source_limb));
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint64_t extract_limb = zig_extract_bits_u64(source_limb, mask_limb, UINT8_C(64));
+
+        uint64_t res_limb_lo;
+        memcpy(&res_limb_lo, &res_bytes[shift_limbs], sizeof(res_limb_lo));
+        res_limb_lo |= extract_limb << shift_bits;
+        memcpy(&res_bytes[shift_limbs], &res_limb_lo, sizeof(res_limb_lo));
+
+        if (shift_bits != 0) {
+            uint64_t res_limb_hi;
+            memcpy(&res_limb_hi, &res_bytes[shift_limbs + 1], sizeof(res_limb_hi));
+            res_limb_hi |= extract_limb >> (64 - shift_bits);
+            memcpy(&res_bytes[shift_limbs + 1], &res_limb_hi, sizeof(res_limb_hi));
+        }
+
+        shift += zig_popcount_u64(mask_limb, UINT8_C(64));
+
+        remaining_bytes -= 64 / CHAR_BIT;
+        byte_offset += 64 / CHAR_BIT;
+    }
+
+    while (remaining_bytes >= 32 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 32;
+        uint32_t shift_limbs = shift / 32;
+
+        uint32_t source_limb;
+        uint32_t mask_limb;
+
+        memcpy(&source_limb, &lhs_bytes[byte_offset], sizeof(source_limb));
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint32_t extract_limb = zig_extract_bits_u32(source_limb, mask_limb, UINT8_C(32));
+
+        uint32_t res_limb_lo;
+        memcpy(&res_limb_lo, &res_bytes[shift_limbs], sizeof(res_limb_lo));
+        res_limb_lo |= extract_limb << shift_bits;
+        memcpy(&res_bytes[shift_limbs], &res_limb_lo, sizeof(res_limb_lo));
+
+        if (shift_bits != 0) {
+            uint32_t res_limb_hi;
+            memcpy(&res_limb_hi, &res_bytes[shift_limbs + 1], sizeof(res_limb_hi));
+            res_limb_hi |= extract_limb >> (32 - shift_bits);
+            memcpy(&res_bytes[shift_limbs + 1], &res_limb_hi, sizeof(res_limb_hi));
+        }
+
+        shift += zig_popcount_u32(mask_limb, UINT8_C(32));
+
+        remaining_bytes -= 32 / CHAR_BIT;
+        byte_offset += 32 / CHAR_BIT;
+    }
+
+    while (remaining_bytes >= 16 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 16;
+        uint16_t shift_limbs = shift / 16;
+
+        uint16_t source_limb;
+        uint16_t mask_limb;
+
+        memcpy(&source_limb, &lhs_bytes[byte_offset], sizeof(source_limb));
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint16_t extract_limb = zig_extract_bits_u16(source_limb, mask_limb, UINT8_C(16));
+
+        uint16_t res_limb_lo;
+        memcpy(&res_limb_lo, &res_bytes[shift_limbs], sizeof(res_limb_lo));
+        res_limb_lo |= extract_limb << shift_bits;
+        memcpy(&res_bytes[shift_limbs], &res_limb_lo, sizeof(res_limb_lo));
+
+        if (shift_bits != 0) {
+            uint16_t res_limb_hi;
+            memcpy(&res_limb_hi, &res_bytes[shift_limbs + 1], sizeof(res_limb_hi));
+            res_limb_hi |= extract_limb >> (16 - shift_bits);
+            memcpy(&res_bytes[shift_limbs + 1], &res_limb_hi, sizeof(res_limb_hi));
+        }
+
+        shift += zig_popcount_u16(mask_limb, UINT8_C(16));
+
+        remaining_bytes -= 16 / CHAR_BIT;
+        byte_offset += 16 / CHAR_BIT;
+    }
+
+    while (remaining_bytes >= 8 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 8;
+        uint8_t shift_limbs = shift / 8;
+
+        uint8_t source_limb;
+        uint8_t mask_limb;
+
+        memcpy(&source_limb, &lhs_bytes[byte_offset], sizeof(source_limb));
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint8_t extract_limb = zig_extract_bits_u8(source_limb, mask_limb, UINT8_C(8));
+
+        uint8_t res_limb_lo;
+        memcpy(&res_limb_lo, &res_bytes[shift_limbs], sizeof(res_limb_lo));
+        res_limb_lo |= extract_limb << shift_bits;
+        memcpy(&res_bytes[shift_limbs], &res_limb_lo, sizeof(res_limb_lo));
+
+        if (shift_bits != 0) {
+            uint8_t res_limb_hi;
+            memcpy(&res_limb_hi, &res_bytes[shift_limbs + 1], sizeof(res_limb_hi));
+            res_limb_hi |= extract_limb >> (8 - shift_bits);
+            memcpy(&res_bytes[shift_limbs + 1], &res_limb_hi, sizeof(res_limb_hi));
+        }
+
+        shift += zig_popcount_u8(mask_limb, UINT8_C(8));
+
+        remaining_bytes -= 8 / CHAR_BIT;
+        byte_offset += 8 / CHAR_BIT;
+    }
+}
+
+
+// TODO big endian
+static inline void zig_deposit_bits_big(void *res, const void *lhs, const void *rhs, bool is_signed, uint16_t bits) {
+    uint8_t *res_bytes = res;
+    const uint8_t *lhs_bytes = lhs;
+    const uint8_t *rhs_bytes = rhs;
+    uint16_t byte_offset = 0;
+    uint16_t remaining_bytes = zig_int_bytes(bits);
+    uint64_t shift = 0;
+    (void)is_signed;
+
+    while (remaining_bytes >= 64 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 64;
+        uint64_t shift_limbs = shift / 64;
+
+        uint64_t source_limb;
+        memcpy(&source_limb, &lhs_bytes[shift_limbs], sizeof(source_limb));
+        source_limb >>= shift_bits;
+        if (shift_bits != 0) {
+            uint64_t source_limb_hi;
+            memcpy(&source_limb_hi, &lhs_bytes[shift_limbs + 1], sizeof(source_limb_hi));
+            source_limb_hi <<= 64 - shift_bits;
+            source_limb += source_limb_hi;
+        }
+
+        uint64_t mask_limb;
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint64_t deposit_limb = zig_deposit_bits_u64(source_limb, mask_limb, UINT8_C(64));
+        memcpy(&res_bytes[byte_offset], &deposit_limb, sizeof(deposit_limb));
+
+        shift += zig_popcount_u64(mask_limb, UINT8_C(64));
+
+        remaining_bytes -= 64 / CHAR_BIT;
+        byte_offset += 64 / CHAR_BIT;
+    }
+
+    while (remaining_bytes >= 32 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 32;
+        uint32_t shift_limbs = shift / 32;
+
+        uint32_t source_limb;
+        memcpy(&source_limb, &lhs_bytes[shift_limbs], sizeof(source_limb));
+        source_limb >>= shift_bits;
+        if (shift_bits != 0) {
+            uint32_t source_limb_hi;
+            memcpy(&source_limb_hi, &lhs_bytes[shift_limbs + 1], sizeof(source_limb_hi));
+            source_limb_hi <<= 32 - shift_bits;
+            source_limb += source_limb_hi;
+        }
+
+        uint32_t mask_limb;
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint32_t deposit_limb = zig_deposit_bits_u32(source_limb, mask_limb, UINT8_C(32));
+        memcpy(&res_bytes[byte_offset], &deposit_limb, sizeof(deposit_limb));
+
+        shift += zig_popcount_u32(mask_limb, UINT8_C(32));
+
+        remaining_bytes -= 32 / CHAR_BIT;
+        byte_offset += 32 / CHAR_BIT;
+    }
+
+    while (remaining_bytes >= 16 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 16;
+        uint16_t shift_limbs = shift / 16;
+
+        uint16_t source_limb;
+        memcpy(&source_limb, &lhs_bytes[shift_limbs], sizeof(source_limb));
+        source_limb >>= shift_bits;
+        if (shift_bits != 0) {
+            uint16_t source_limb_hi;
+            memcpy(&source_limb_hi, &lhs_bytes[shift_limbs + 1], sizeof(source_limb_hi));
+            source_limb_hi <<= 16 - shift_bits;
+            source_limb += source_limb_hi;
+        }
+
+        uint16_t mask_limb;
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint16_t deposit_limb = zig_deposit_bits_u16(source_limb, mask_limb, UINT8_C(16));
+        memcpy(&res_bytes[byte_offset], &deposit_limb, sizeof(deposit_limb));
+
+        shift += zig_popcount_u16(mask_limb, UINT8_C(16));
+
+        remaining_bytes -= 16 / CHAR_BIT;
+        byte_offset += 16 / CHAR_BIT;
+    }
+
+    while (remaining_bytes >= 8 / CHAR_BIT) {
+        uint8_t shift_bits = shift % 8;
+        uint8_t shift_limbs = shift / 8;
+
+        uint8_t source_limb;
+        memcpy(&source_limb, &lhs_bytes[shift_limbs], sizeof(source_limb));
+        source_limb >>= shift_bits;
+        if (shift_bits != 0) {
+            uint8_t source_limb_hi;
+            memcpy(&source_limb_hi, &lhs_bytes[shift_limbs + 1], sizeof(source_limb_hi));
+            source_limb_hi <<= 8 - shift_bits;
+            source_limb += source_limb_hi;
+        }
+
+        uint8_t mask_limb;
+        memcpy(&mask_limb, &rhs_bytes[byte_offset], sizeof(mask_limb));
+
+        uint8_t deposit_limb = zig_deposit_bits_u8(source_limb, mask_limb, UINT8_C(8));
+        memcpy(&res_bytes[byte_offset], &deposit_limb, sizeof(deposit_limb));
+
+        shift += zig_popcount_u8(mask_limb, UINT8_C(8));
+
+        remaining_bytes -= 8 / CHAR_BIT;
+        byte_offset += 8 / CHAR_BIT;
+    }
 }
 
 /* ========================= Floating Point Support ========================= */

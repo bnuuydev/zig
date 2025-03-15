@@ -82266,8 +82266,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
             .c_va_start => try cg.airVaStart(inst),
             .work_item_id, .work_group_size, .work_group_id => unreachable,
 
-            .deposit_bits,
-            .extract_bits => |tag| try cg.airDepositExtractBits(inst, tag),
+            .deposit_bits, .extract_bits => |tag| try cg.airDepositExtractBits(inst, tag),
         }
         try cg.resetTemps(@enumFromInt(0));
         cg.checkInvariantsAfterAirInst();

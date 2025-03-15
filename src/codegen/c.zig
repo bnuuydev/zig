@@ -3496,8 +3496,10 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) error{ AnalysisFail,
             .call_never_tail   => try airCall(f, inst, .never_tail),
             .call_never_inline => try airCall(f, inst, .never_inline),
 
-            .deposit_bits => try airDepositExtractBits(f, inst, "deposit_bits"),
-            .extract_bits => try airDepositExtractBits(f, inst, "extract_bits"),
+            //.deposit_bits => try airDepositExtractBits(f, inst, "deposit_bits"),
+            //.extract_bits => try airDepositExtractBits(f, inst, "extract_bits"),
+            .deposit_bits => try airBinBuiltinCall(f, inst, "deposit_bits", .bits),
+            .extract_bits => try airBinBuiltinCall(f, inst, "extract_bits", .bits),
             // zig fmt: on
         };
         if (result_value == .new_local) {
@@ -7695,12 +7697,12 @@ fn airCVaCopy(f: *Function, inst: Air.Inst.Index) !CValue {
 fn airDepositExtractBits(f: *Function, inst: Air.Inst.Index, operation: []const u8) !CValue {
     const bin_op = f.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const ty = f.typeOf(bin_op.lhs);
- 
+
     const ctype = try f.ctypeFromType(ty, .complete);
     const is_big = ctype.info(&f.object.dg.ctype_pool) == .array;
 
-    if (is_big) return f.fail("TODO: C backend: implement @{{deposit,extract}}Bits for bigints", .{});
-    if (f.byteSize(ctype) > 8) return f.fail("TODO: C backend: implement @{{deposit,extract}}Bits for u128", .{});
+    // if (is_big) return f.fail("TODO: C backend: implement @{{deposit,extract}}Bits for bigints", .{});
+    if (!is_big and f.byteSize(ctype) > 8) return f.fail("TODO: C backend: implement @{{deposit,extract}}Bits for u128", .{});
 
     return try airBinBuiltinCall(f, inst, operation, .none);
 }
